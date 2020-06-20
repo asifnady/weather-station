@@ -1,15 +1,17 @@
 #include <TridentTD_OpenWeather.h>
 #include <TM1637Display.h>
-#include <PubSubClient.h>
+#include "Adafruit_MQTT.h"
+#include "Adafruit_MQTT_Client.h"
 
-const char* mqttServer = "io.adafruit.com";
-const int mqttPort = 1883;
-const char* mqttUser = "asifnadeem";
-const char* mqttPassword = "aio_AwiV95Wyp9dneXTK5Rk5pcdQkHx4";
 
 #define ssid      "WLAN-188633"
 #define pass      "52569188968217068708"
 
+
+#define AIO_SERVER      "io.adafruit.com"
+#define AIO_SERVERPORT  1883
+#define AIO_USERNAME    "asifnadeem"
+#define AIO_KEY         "aio_KtWU11b1XocxIohZcd7I3Vf9Pm5a"
 
 #define OpenWeather_APIKEY    "d1c79deba4ee09adfedf09953890adbc"
 
@@ -27,39 +29,21 @@ uint8_t H_char[] = {0x75};
 uint8_t L_char[] = {0x38};
 
 TridentTD_OpenWeather myPlace(OpenWeather_APIKEY);
+
 TM1637Display display(CLK, DIO);
-WiFiClient espclient;
-PubSubClient client(espclient);
+
+
+WiFiClientSecure client;
+Adafruit_MQTT_Client mqtt(&client, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, AIO_USERNAME, AIO_KEY);
+
+Adafruit_MQTT_Subscribe timefeed = Adafruit_MQTT_Subscribe(&mqtt, "time/seconds");
 
 // set timezone offset from UTC
 int timeZone = 2; // UTC - 4 eastern daylight time (nyc)
 int interval = 1; // trigger every X hours
 int hour = 0; // current hour
-int last_min = -1;
 
-void reconnect();
-void callback(char* topic, byte* payload, unsigned int length);
-
-void timecallback_minute(int current){
-  // adjust to local time zone
-current += (timeZone * 60 * 60);
-int curr_hour = (current / 60 / 60) % 24;
-int curr_min  = (current / 60 ) % 60;
-int curr_sec  = (current) % 60;
-
-Serial.print("Time: ");
-Serial.print(curr_hour); Serial.print(':');
-Serial.print(curr_min); Serial.print(':');
-Serial.println(curr_sec);
-
-// only trigger on minute change
-if(curr_min != last_min) {
-  last_min = curr_min;
-
-  Serial.println("This will print out every minute!");
-  }
-}
-void timecallback(int current) {
+void timecallback(uint32_t current) {
 
   // stash previous hour
   int previous = hour;
@@ -69,7 +53,6 @@ void timecallback(int current) {
 
   // calculate current hour
   hour = (current / 60 / 60) % 24;
-  Serial.println("Run your code here");
 
   // only trigger on interval
   if((hour != previous) && (hour % interval) == 0) {
@@ -90,23 +73,8 @@ void setup() {
   Serial.println();
 
   myPlace.wificonnect(ssid, pass);
+
   myPlace.setLocation(lat, lon );
-
-  client.setServer(mqttServer, 1883);
-  client.setCallback(callback);
-  while (!client.connected()) {
-    Serial.println("Connecting to MQTT...");
-
-    if (client.connect("ESP8266Client", mqttUser, mqttPassword )) {
-      Serial.println("connected");
-      client.subscribe("time/seconds");
-    } else {
-      Serial.print("failed with state ");
-      Serial.print(client.state());
-      delay(2000);
-
-    }
-  }
 
   display.setBrightness(0x08);
 
@@ -132,48 +100,46 @@ void setup() {
   int currtemp = round(myPlace.readTemperature());
   display.showNumberDec(currtemp, false, 2, 2);
 
+  timefeed.setCallback(timecallback);
+  mqtt.subscribe(&timefeed);
+
+}
+void MQTT_connect() {
+  int8_t ret;
+
+  // Stop if already connected.
+  if (mqtt.connected()) {
+    return;
+  }
+
+  Serial.print("Connecting to MQTT... ");
+
+  uint8_t retries = 3;
+  while ((ret = mqtt.connect()) != 0) { // connect will return 0 for connected
+       Serial.println(mqtt.connectErrorString(ret));
+       Serial.println("Retrying MQTT connection in 5 seconds...");
+       mqtt.disconnect();
+       delay(5000);  // wait 5 seconds
+       retries--;
+       if (retries == 0) {
+         // basically die and wait for WDT to reset me
+         while (1);
+       }
+  }
+
+  Serial.println("MQTT Connected!");
 }
 
 void loop() {
-  if (!client.connected()) {
-    Serial.println("here");
-    reconnect();
-  }
-  client.loop();
-  delay(1000);
-}
+  // Ensure the connection to the MQTT server is alive (this will make the first
+  // connection and automatically reconnect when disconnected).  See the MQTT_connect
+  // function definition further below.
+  MQTT_connect();
 
-void reconnect() {
-  // Loop until we're reconnected
-  while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    // Attempt to connect
-    if (client.connect("ESP8266Client", mqttUser, mqttPassword )) {
-      Serial.println("connected");
-      // ... and resubscribe
-      client.subscribe("time/seconds");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
-      delay(5000);
-    }
-  }
-}
+  // wait 10 seconds for subscription messages
+  // since we have no other tasks in this example.
+  mqtt.processPackets(10000);
 
-void callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-  for (int i=0;i<length;i++) {
-    Serial.print((char)payload[i]);
-  }
-  Serial.println();
-  payload[length] = '\0';
-  String s = String((char*)payload);
-  int time = s.toInt();
-  Serial.println(time);
-  timecallback_minute(time);
-
+  // keep the connection alive
+  mqtt.ping();
 }
